@@ -1,152 +1,156 @@
 #!/usr/bin/env perl
 #
-#   mp_summarizer.pl <File>
+#   mp_cheezparse.pm
 #
-#   Read & parse an MP file and simplify/summarize it
+#   cheesy MP parser
 #
-#   *NOTE* Parsing is crappy, as I just need a quick & dirty thing ATM.
-#
+package mp_cheezparse;
+
 use strict;
 use warnings;
 use Data::Dump 'pp';
 use MCMUtils;
 
-my %cnt;
-my $scope = 3;
+use Exporter qw(import);
+use Data::Dump qw(pp);
 
-##### read the file #####
+our @EXPORT = qw(
+    tokenize
+    statementize
+    parse
+    parse_rule
+    compute_cardinality
+    cardinality
+);
 
-my $FName = shift or die "Missing MP file name";
-open my $FH, '<', $FName or die "Can't open $FName: $!";
-my @txt =   grep { ! /^$/ }
-            map {s/\s+$//; $_}
-            map { s/\/\/.*$//; $_ }     # rm comments
-            <$FH>;
-
-
-##### tokenize it #####
-my $SRC = join(" ", @txt);
-my @tokens = tokenize($SRC);
-print scalar(@tokens), " tokens read\n";
+our %RULES;
+our $scope=3;
 
 ##### split the tokens into statement groups (on semicolon) #####
-
-my @stmts = ([]);
-for my $T (@tokens) {
-    if ($T->[0] eq 'EOSTMT') {
-        # Start a new statement token list
-        push @stmts, [];
-    }
-    else {
-        push @{$stmts[-1]}, $T;
-    }
-}
-print scalar(@stmts), " statements read\n";
-
-##### parse the statements #####
-my %RULES;
-for my $rS (@stmts) {
-    my @S = @$rS;
-    next unless @S;
-    #print "\n----------\nParsing: ", pp(\@S), "\n";
-    if ($rS->[0][0] ne 'SYM') {
-        die "Unexpected!";
-    }
-
-    if ($S[0][1] eq 'ROOT') {
-        # New root
-        shift @S;
-        my $t = parse_rule(@S);
-        $t->{ROOT}=1;
-        $RULES{$t->{NAME}} = $t;
-    }
-    elsif ($S[1][0] eq 'COLON') {
-        # New rule
-        my $t = parse_rule(@S);
-        $t->{ROOT}=0;
-        $RULES{$t->{NAME}} = $t;
-    }
-    elsif ($S[1][0] eq 'COMMA') {
-        # New share all?
-        print "??? SHARE ALL ???\n";
-    }
-    else {
-        print "<<< ", pp($rS), ">>>\n";
-        die "Eh?";
-    }
-}
-
-for my $r (values %RULES) {
-    if ($r->{ROOT}) { ++$cnt{ROOTS} } else { ++$cnt{RULES} }
-    if ($r->{ATOM}) { ++$cnt{ATOMS} }
-}
-
-# Check through the rule symbol lists to see if any rules are missing.  If so,
-# we'll create ATOM references for 'em.
-print "\n\nChecking for references to missing rules\n";
-my @new_atoms;
-for my $rule (sort keys %RULES) {
-    for my $sym (sort keys %{$RULES{$rule}{SYMS}}) {
-        if (! exists $RULES{$sym}) {
-            print "Creating atomic rule '$sym'\n";
-            push @new_atoms, $sym;
+sub statementize {
+    my @tokens = @_;
+    my @stmts = ([]);
+    for my $T (@tokens) {
+        if ($T->[0] eq 'EOSTMT') {
+            # Start a new statement token list
+            push @stmts, [];
+        }
+        else {
+            push @{$stmts[-1]}, $T;
         }
     }
+    return @stmts;
 }
 
-$RULES{$_} = { ATOM=>1, CARD=>1, ROOT=>0, NAME=>$_, SYMS=>{} } for @new_atoms;
-
-# Compute rule cardinality.  It's effectively done as a toposort, as we've already assigned
-# atoms (rules with no dependencies) as having cardinality 1.  Each pass, we remove
-# from each rules SYM list all rules having a cardinality.  If the rule has no SYMs left,
-# we compute the cardinality, otherwise, we save the rule for next pass.
-
-my $chgs = 1; #force first pass
-while ($chgs) {
-    $chgs = 0;
-    my @rules_to_check = grep { ! exists $RULES{$_}{CARD} } keys %RULES;
-    ++$cnt{PASS};
-    print "\n\n", "*"x80, "\n";
-    print "Pass $cnt{PASS}: RULES TO CHECK: ", join(", ", @rules_to_check), "\n\n";
-
-    for my $rule (@rules_to_check) {
-        my @deps = sort keys %{$RULES{$rule}{SYMS}};
-        if (@deps) {
-            print "\nRULE $rule: ", join(", ", @deps), ".\n";
-            print "\tchecking dependencies\n";
-            my @tmp = grep { exists $RULES{$_}{CARD} } keys %RULES;
-            delete @{$RULES{$rule}{SYMS}}{@tmp};
-            @deps = sort keys %{$RULES{$rule}{SYMS}};
-            print "\tleft: ", join(", ", @deps), ".\n";
+sub parse {
+    my @stmts = @_;
+    for my $rS (@stmts) {
+        my @S = @$rS;
+        next unless @S;
+        #print "\n----------\nParsing: ", pp(\@S), "\n";
+        if ($rS->[0][0] ne 'SYM') {
+            print "X: ", pp($rS), "\n";
+            die "Unexpected!";
         }
-        if (@deps) {
-            print "\tWe still have dependencies, so skip this pass\n";
-            next;
+
+        if ($S[0][1] eq 'ROOT') {
+            # New root
+            shift @S;
+            my $t = parse_rule(@S);
+            $t->{ROOT}=1;
+            $RULES{$t->{NAME}} = $t;
         }
-        $RULES{$rule}{CARD} = cardinality($rule);
-        print "\tcardinality = $RULES{$rule}{CARD}\n";
-        ++$chgs;
+        elsif ($S[1][0] eq 'COLON') {
+            # New rule
+            my $t = parse_rule(@S);
+            $t->{ROOT}=0;
+            $RULES{$t->{NAME}} = $t;
+        }
+        elsif ($S[1][0] eq 'COMMA') {
+            # New share all?
+            print "??? SHARE ALL ???\n";
+        }
+        else {
+            print "<<< ", pp($rS), ">>>\n";
+            die "Eh?";
+        }
     }
-    print "*** $chgs ***\n\n";
+
+    return \%RULES;
 }
 
-print pp(\%RULES), "\n\n";
-print pp(\%cnt),"\n";
-
-##### Display the summary
-# (the basic cardinality of the system (excluding the share all) is
-# the product of the cardinality of the roots)
-my $system_cardinality = 1;
-for my $rule (sort keys %RULES) {
-    $system_cardinality *= $RULES{$rule}{CARD} if $RULES{$rule}{ROOT};
-    next if $RULES{$rule}{ATOM};
-    printf "%-20.20s  %-5.5s %-5.5s % 8u\n", $rule,
-    ($RULES{$rule}{ATOM} ? "ATOM" : ""),
-    ($RULES{$rule}{ROOT} ? "ROOT" : ""),
-    $RULES{$rule}{CARD};
+sub create_missing_atoms {
+    # Check through the rule symbol lists to see if any rules are missing.  If so,
+    # we'll create ATOM references for 'em.
+    print "\n\nChecking for references to missing rules\n";
+    my @new_atoms;
+    for my $rule (sort keys %RULES) {
+        for my $sym (sort keys %{$RULES{$rule}{SYMS}}) {
+            if (! exists $RULES{$sym}) {
+                print "Creating atomic rule '$sym'\n";
+                push @new_atoms, $sym;
+            }
+        }
+    }
+    $RULES{$_} = { ATOM=>1, CARD=>1, ROOT=>0, NAME=>$_, SYMS=>{} } for @new_atoms;
 }
-$system_cardinality = eng_not($system_cardinality);
-print "System cardinality (excluding share all rules): $system_cardinality\n";
+
+
+sub compute_cardinality {
+    # Compute rule cardinality.  It's effectively done as a toposort, as we've already assigned
+    # atoms (rules with no dependencies) as having cardinality 1.  Each pass, we remove
+    # from each rules SYM list all rules having a cardinality.  If the rule has no SYMs left,
+    # we compute the cardinality, otherwise, we save the rule for next pass.
+
+    my $chgs = 1; #force first pass
+    my $pass = 0;
+    while ($chgs) {
+        $chgs = 0;
+        my @rules_to_check = grep { ! exists $RULES{$_}{CARD} } keys %RULES;
+        last if !@rules_to_check;
+
+        ++$pass;
+        print "\n\n", "*"x80, "\n";
+        print "Pass $pass: RULES TO CHECK: ", join(", ", @rules_to_check), "\n";
+
+        for my $rule (@rules_to_check) {
+            my @deps = sort keys %{$RULES{$rule}{SYMS}};
+            if (@deps) {
+                print "\nRULE $rule: ", scalar(@deps), " dependencies\n";
+                my @tmp = grep { exists $RULES{$_}{CARD} } keys %RULES;
+                delete @{$RULES{$rule}{SYMS}}{@tmp};
+                @deps = sort keys %{$RULES{$rule}{SYMS}};
+            }
+            if (@deps) {
+                print "\tAfter check, ", scalar(@deps), " remain, try again next pass\n";
+                next;
+            }
+            else {
+                print "\tAll cleared!\n";
+            }
+            $RULES{$rule}{CARD} = cardinality($rule);
+            ++$chgs;
+        }
+        print "*** $chgs ***\n\n";
+    }
+}
+
+sub display_cardinality_summary {
+    ##### Display the summary
+    # (the basic cardinality of the system (excluding the share all) is
+    # the product of the cardinality of the roots)
+    my $system_cardinality = 1;
+    for my $rule (sort keys %RULES) {
+        $system_cardinality *= $RULES{$rule}{CARD} if $RULES{$rule}{ROOT};
+        next if $RULES{$rule}{ATOM};
+        printf "%-20.20s  %-5.5s %-5.5s % 8u\n", $rule,
+        ($RULES{$rule}{ATOM} ? "ATOM" : ""),
+        ($RULES{$rule}{ROOT} ? "ROOT" : ""),
+        $RULES{$rule}{CARD};
+    }
+    $system_cardinality = eng_not($system_cardinality);
+    print "System cardinality (excluding share all rules): $system_cardinality\n";
+}
 
 
 sub tokenize {
@@ -188,7 +192,7 @@ sub parse_rule {
         unless $t[0][0] eq 'COLON';
     shift @t;
 
-    ++$cnt{PARSE};
+    cnt(PARSE);
 
     # Essentially, everything is an implicit SEQUENCE, and we just need to maintain a
     # stack of contexts to push sequences and events into.  Each time we hit an operator
@@ -270,8 +274,7 @@ sub parse_rule {
 
     if (@t) {
         $rv->{REST} = [@t];
-        ++$cnt{FAULTS};
-        push @{$cnt{FLTLIST}}, $rv;
+        cnt(FAULTS);
     }
 
     #print "stmt: ", pp($rv), "\n";
@@ -280,7 +283,6 @@ sub parse_rule {
 
 sub cmp_card {
     my $ar = shift;
-    print "cmp_card ", pp($ar), "\n";
     if ("" eq ref $ar->[0]) {
         if ($ar->[0] eq 'ALT') { return cmp_alt($ar); }
         if ($ar->[0] eq 'SET') { return cmp_set($ar); }
@@ -299,10 +301,8 @@ sub cmp_card {
 sub cmp_alt {
     my $ar = shift;
     # An ALT is simply the cardinality of the sum of the cardinality of its branches
-    print "ALT: ", pp($ar), "\n";
     my $rv = 0;
     $rv += cmp_card($ar->[$_]) for 1 .. $#$ar;
-    print "ALT result $rv\n";
     return $rv;
 }
 
@@ -311,14 +311,12 @@ sub cmp_rpt {
     # Repeat is a loop, so we repeat the body from 0 to scope
     my $rv = 1;
     $rv *= cmp_card($ar->[$_]) for 1 .. $#$ar;
-    print "RPT: base cardinality $rv, scope = $scope\n";
     my $accum = 1; # for 0 repeats
     my $tmp = 1; # start
     for (1 .. $scope) {
         $tmp *= $rv;
         $accum += $tmp;
     }
-    print "RPT: out: $accum\n";
     return $accum;
 }
 
